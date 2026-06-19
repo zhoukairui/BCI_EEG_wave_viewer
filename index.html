@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>EEG Unified 多设备脑电监测</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;font-family:'Segoe UI',Arial,sans-serif}
+body{background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);color:#e6e6e6;min-height:100vh;padding:10px}
+.container{max-width:100%;margin:0 auto}
+header{text-align:center;padding:15px 0;border-bottom:1px solid rgba(255,255,255,0.1);margin-bottom:15px}
+h1{font-size:1.5rem;color:#4cc9f0;text-shadow:0 0 10px rgba(76,201,240,0.5)}
+.qr-area{text-align:center;font-size:0.8rem;color:#aaa;margin-bottom:8px}
+.qr-area a{color:#4cc9f0;word-break:break-all}
+.status-bar{display:flex;justify-content:space-between;background:rgba(0,0,0,0.3);padding:10px;border-radius:8px;margin-bottom:15px;font-size:0.9rem;flex-wrap:wrap;gap:5px}
+.device-selector{display:flex;gap:10px;margin-bottom:10px;align-items:center}
+.device-selector select{padding:10px;background:#2a2a4a;border:1px solid rgba(255,255,255,0.2);border-radius:8px;color:#e6e6e6;font-size:1rem;cursor:pointer;flex:1;outline:none;appearance:auto}
+.device-selector select option{background:#2a2a4a;color:#e6e6e6;padding:8px}
+.control-panel{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:15px}
+.control-panel.wide{grid-template-columns:repeat(7,1fr)}
+.tip-box{background:rgba(247,37,133,0.2);border-left:4px solid #f72585;padding:10px;border-radius:4px;margin-bottom:15px;font-size:0.85rem;line-height:1.4}
+button{background:linear-gradient(to right,#4361ee,#3a0ca3);color:#fff;border:none;padding:12px;border-radius:8px;font-weight:bold;cursor:pointer;transition:all 0.3s;font-size:0.95rem}
+button:active{transform:scale(0.98)}
+button:disabled{background:#555;cursor:not-allowed}
+button.danger{background:linear-gradient(to right,#e63946,#c1121f)}
+button.success{background:linear-gradient(to right,#2ec4b6,#007f5f)}
+.filter-panel{background:rgba(0,0,0,0.3);border-radius:8px;padding:15px;margin-bottom:15px}
+.filter-group{margin-bottom:10px}
+.filter-group h3{font-size:1rem;margin-bottom:8px;color:#f72585;display:inline-block;margin-right:15px}
+.filter-controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.filter-btn{padding:8px 12px;background:rgba(255,255,255,0.1);font-size:0.85rem;border:none;border-radius:8px;color:#e6e6e6;cursor:pointer}
+.filter-btn.active{background:linear-gradient(to right,#f72585,#b5179e)}
+input[type="number"]{width:60px;padding:8px;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.3);border-radius:5px;color:#fff}
+.connection-status{display:inline-flex;align-items:center;gap:5px}
+.status-dot{width:10px;height:10px;border-radius:50%;background:#ff4757}
+.status-dot.connected{background:#2ed573;animation:pulse 2s infinite}
+@keyframes pulse{0%{opacity:1}50%{opacity:0.5}100%{opacity:1}}
+.data-info{font-size:0.8rem;opacity:0.8}
+.chart-grid{display:grid;gap:15px;margin-bottom:15px}
+.chart-container{background:rgba(0,0,0,0.3);border-radius:8px;padding:10px;position:relative;height:220px}
+.chart-title{font-size:1rem;margin-bottom:8px;color:#72efdd;display:flex;justify-content:space-between;align-items:center}
+.chart-title .val{font-size:0.8rem;color:#aaa}
+footer{text-align:center;padding:15px;font-size:0.8rem;opacity:0.7;border-top:1px solid rgba(255,255,255,0.1);margin-top:15px}
+.log-box{width:100%;min-height:100px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.15);border-radius:8px;padding:10px;color:#a7f3d0;font-family:Consolas,monospace;font-size:11px;resize:vertical;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="container">
+<header><h1>EEG Unified 多设备脑电监测</h1></header>
+<div class="qr-area" id="qrArea"></div>
+<div class="tip-box" id="preCheckTip"></div>
+<div class="device-selector">
+<select id="deviceSelect">
+<option value="EEG_001">EEG 001 (1ch&#8594;2ch)</option>
+<option value="EEG_005" selected>EEG 005 (5ch)</option>
+<option value="EEG_008">EEG 008 (8ch)</option>
+</select>
+</div>
+<div class="status-bar">
+<div style="display:flex;align-items:center;gap:15px;flex-wrap:wrap">
+<div class="connection-status">
+<span class="status-dot" id="statusDot"></span>
+<span id="connectionStatus">未连接</span>
+</div>
+<span style="font-size:0.85rem">设备: <span id="deviceLabel">EEG 005 (5ch)</span></span>
+</div>
+<div class="data-info" id="dataInfo"><span>等待数据...</span></div>
+</div>
+<div class="control-panel wide" id="controlPanel">
+<button id="scanBtn">扫描设备</button>
+<button id="connectBtn" disabled>连接</button>
+<button id="disconnectBtn" class="danger" disabled>断开</button>
+<button id="startBtn" class="success" disabled>开始</button>
+<button id="stopBtn" class="danger" disabled>停止</button>
+<button id="exportBtn">导出日志</button>
+<button id="clearBtn">新建会话</button>
+</div>
+<div class="filter-panel">
+<div class="filter-group">
+<h3>EEG 滤波</h3>
+<div class="filter-controls">
+<button class="filter-btn" id="eegHpBtn">0.5Hz 高通</button>
+<button class="filter-btn" id="eegLpBtn">低通</button>
+<input type="number" id="eegLpFreq" value="30" min="1" max="100">
+<button class="filter-btn" id="eegNotchBtn">50Hz 陷波</button>
+<button class="filter-btn" id="eegNotch60Btn">60Hz 陷波</button>
+</div>
+</div>
+<div class="filter-group" style="margin-bottom:0">
+<h3>量程 (uV)</h3>
+<div class="filter-controls">
+<select id="rangeSelect" style="padding:8px 12px;background:#2a2a4a;border:1px solid rgba(255,255,255,0.2);border-radius:8px;color:#e6e6e6;font-size:0.9rem;cursor:pointer;outline:none">
+<option value="50">50 uV</option>
+<option value="100">100 uV</option>
+<option value="200">200 uV</option>
+<option value="500" selected>500 uV</option>
+<option value="1000">1000 uV</option>
+<option value="2000">2000 uV</option>
+<option value="5000">5000 uV</option>
+<option value="10000">10000 uV</option>
+</select>
+</div>
+</div>
+</div>
+<textarea class="log-box" id="logBox" readonly placeholder="运行日志..."></textarea>
+<div class="chart-grid" id="chartGrid"></div>
+<footer><p>基于 Web Bluetooth | 兼容 Chrome/Edge</p></footer>
+</div>
+<script>
+// ═════════════════════════════════════════════════════════════════
+// 设备配置表（新增设备类型只需在此添加条目）
+// ═════════════════════════════════════════════════════════════════
+const DEVICE_PROFILES = {
+  EEG_001: {
+    label: 'EEG 001 (1ch\u21922ch)',
+    nChannels: 2,
+    colors: ['#f59e0b', '#06b6d4'],
+    header: [0xFF, 0xAA, 0x55],
+    payloadStart: 4,
+    payloadLen: 75,
+    nSamples: 25,
+    samplesPerRow: 1,      // 1 physical, duplicated to 2
+    startCmd: new Uint8Array([0x62]),
+    stopCmd:  new Uint8Array([0x63]),
+    saveSuffix: '_EEG001_ble_data.txt',
+  },
+  EEG_005: {
+    label: 'EEG 005 (5ch)',
+    nChannels: 5,
+    colors: ['#f59e0b', '#06b6d4', '#22c55e', '#ef4444', '#a855f7'],
+    header: [0xFF],
+    payloadStart: 2,
+    payloadLen: 75,
+    nSamples: 25,
+    samplesPerRow: 5,
+    startCmd: new Uint8Array([0x62]),
+    stopCmd:  new Uint8Array([0x63]),
+    saveSuffix: '_EEG005_ble_data.txt',
+  },
+  EEG_008: {
+    label: 'EEG 008 (8ch)',
+    nChannels: 8,
+    colors: ['#f59e0b','#06b6d4','#22c55e','#ef4444','#a855f7','#ec4899','#14b8a6','#f97316'],
+    header: [0x23, 0x23, 0x3E],
+    payloadStart: 10,
+    payloadLen: 120,
+    nSamples: 40,
+    samplesPerRow: 8,
+    startCmd: new Uint8Array([0x41,0x48,0x42,0x2B,0x53,0x54,0x41,0x52,0x54,0x3D,0x31,0x0D,0x0A]),
+    stopCmd:  new Uint8Array([0x41,0x48,0x42,0x2B,0x53,0x54,0x4F,0x50,0x3D,0x30,0x0D,0x0A]),
+    saveSuffix: '_EEG008_ble_data.txt',
+  }
+};
+const EEG_FS = 250, SHOW_SECONDS = 10, EEG_POINTS = EEG_FS * SHOW_SECONDS;
+const RANGE_VALUES = [50, 100, 200, 500, 1000, 2000, 5000, 10000];
+
+// ═════════════════════════════════════════════════════════════════
+// 工具函数
+// ═════════════════════════════════════════════════════════════════
+function bytesToHex(arr) { return Array.from(arr).map(x => x.toString(16).padStart(2,'0')).join(''); }
+function toSigned24(v) { return v > 8388607 ? v - 16777216 : v; }
+
+// ═════════════════════════════════════════════════════════════════
+// 通用包解析器
+// ═════════════════════════════════════════════════════════════════
+function parsePacket(dataBytes, cfg) {
+  const header = cfg.header;
+  const pStart = cfg.payloadStart;
+  const pLen   = cfg.payloadLen;
+  const nSamp  = cfg.nSamples;
+  const spRow  = cfg.samplesPerRow;
+
+  if (dataBytes.length < pStart + pLen) return null;
+  for (let h = 0; h < header.length; h++) {
+    if (dataBytes[h] !== header[h]) return null;
+  }
+
+  const raw = [];
+  for (let i = pStart; i + 2 < pStart + pLen; i += 3) {
+    const v = (dataBytes[i] << 16) | (dataBytes[i+1] << 8) | dataBytes[i+2];
+    raw.push(toSigned24(v) * 4.5 / (8388607 * 24) * 1000000);
+  }
+  if (raw.length < nSamp) return null;
+
+  if (spRow === 1) {
+    // EEG_001: duplicate
+    return raw.slice(0, nSamp).map(v => [v, v]);
+  } else {
+    const nRows = Math.floor(nSamp / spRow);
+    const out = [];
+    for (let r = 0; r < nRows; r++) out.push(raw.slice(r * spRow, r * spRow + spRow));
+    return out;
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════
+// RingBuffer
+// ═════════════════════════════════════════════════════════════════
+class RingBuffer {
+  constructor(size) { this.data = new Float64Array(size); this.size = size; this.idx = 0; this.full = false; }
+  push(v) { this.data[this.idx] = v; this.idx = (this.idx+1) % this.size; if (this.idx===0) this.full=true; }
+  pushBatch(arr) { for (const v of arr) this.push(v); }
+  toArray() {
+    if (!this.full) return Array.from(this.data.slice(0, this.idx));
+    return Array.from(this.data.slice(this.idx)).concat(Array.from(this.data.slice(0, this.idx)));
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════
+// 滤波器
+// ═════════════════════════════════════════════════════════════════
+class DigitalFilter {
+  constructor(b, a) {
+    this.b = b.slice(); this.a = a.slice();
+    this.xs = new Array(b.length).fill(0);
+    this.ys = new Array(a.length-1).fill(0);
+  }
+  process(x) {
+    if (!Number.isFinite(x)) return x;
+    this.xs.unshift(x); this.xs.pop();
+    let y = 0;
+    for (let i=0;i<this.b.length;i++) y += this.b[i]*this.xs[i];
+    for (let i=1;i<this.a.length;i++) y -= this.a[i]*this.ys[i-1];
+    y /= this.a[0];
+    this.ys.unshift(y); this.ys.pop();
+    return y;
+  }
+}
+function biquadLP(fs,fc,q) {
+  q=q||Math.SQRT1_2; const w0=2*Math.PI*fc/fs,cosw=Math.cos(w0),sinw=Math.sin(w0),a=sinw/(2*q),a0=1+a;
+  return {b:[(1-cosw)/2/a0,(1-cosw)/a0,(1-cosw)/2/a0], a:[1,(-2*cosw)/a0,(1-a)/a0]};
+}
+function biquadHP(fs,fc,q) {
+  q=q||Math.SQRT1_2; const w0=2*Math.PI*fc/fs,cosw=Math.cos(w0),sinw=Math.sin(w0),a=sinw/(2*q),a0=1+a;
+  return {b:[(1+cosw)/2/a0,-(1+cosw)/a0,(1+cosw)/2/a0], a:[1,(-2*cosw)/a0,(1-a)/a0]};
+}
+function biquadNotch(fs,freq,q) {
+  q=q||30; const w0=2*Math.PI*freq/fs,cosw=Math.cos(w0),sinw=Math.sin(w0),a=sinw/(2*q);
+  return {b:[1/(1+a),(-2*cosw)/(1+a),1/(1+a)], a:[1,(-2*cosw)/(1+a),(1-a)/(1+a)]};
+}
+
+// ═════════════════════════════════════════════════════════════════
+// 状态
+// ═════════════════════════════════════════════════════════════════
+let currentDevice = 'EEG_005';
+function getCfg() { return DEVICE_PROFILES[currentDevice]; }
+
+const S = {
+  device: null, server: null, notifyCh: null, writeCh: null,
+  connected: false, collecting: false,
+  pktCount: 0,
+  eegHp: false, eegLp: false, eegLpF: 30, eegNotch: false, notchFreq: 50
+};
+let filters = {};
+let bufs = [];
+let charts = [];
+let rawLog = [];
+const tEeg = Array.from({length: EEG_POINTS}, (_, i) => -SHOW_SECONDS + i / EEG_FS);
+
+function recreateBufs() {
+  const n = getCfg().nChannels;
+  bufs = Array.from({length: n}, () => new RingBuffer(EEG_POINTS));
+}
+
+function recreateFilters() {
+  const fs = EEG_FS, n = getCfg().nChannels;
+  filters = {};
+  for (let i = 0; i < n; i++) {
+    filters[`hp${i}`]    = S.eegHp    ? new DigitalFilter(biquadHP(fs,0.5).b, biquadHP(fs,0.5).a) : null;
+    filters[`lp${i}`]    = S.eegLp    ? new DigitalFilter(biquadLP(fs,S.eegLpF).b, biquadLP(fs,S.eegLpF).a) : null;
+    filters[`notch${i}`] = S.eegNotch ? new DigitalFilter(biquadNotch(fs,S.notchFreq).b, biquadNotch(fs,S.notchFreq).a) : null;
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════
+// 图表管理
+// ═════════════════════════════════════════════════════════════════
+function rebuildCharts() {
+  const grid = document.getElementById('chartGrid');
+  grid.innerHTML = '';
+  charts.forEach(c => c.destroy());
+  charts = [];
+
+  const cfg = getCfg();
+  const n = cfg.nChannels;
+  for (let i = 0; i < n; i++) {
+    const container = document.createElement('div');
+    container.className = 'chart-container';
+    const title = document.createElement('div');
+    title.className = 'chart-title';
+    title.innerHTML = `<span>CH${i+1}</span><span class="val" id="val${i}">-- uV</span>`;
+    container.appendChild(title);
+    const canvas = document.createElement('canvas');
+    canvas.id = `chart${i}`;
+    container.appendChild(canvas);
+    grid.appendChild(container);
+
+    const chart = new Chart(canvas, {
+      type: 'line',
+      data: { labels: tEeg, datasets: [{label: `CH${i+1}`, data: [], borderColor: cfg.colors[i], borderWidth: 1.5}] },
+      options: {
+        animation: false, responsive: true, maintainAspectRatio: false, normalized: true,
+        interaction: {mode: 'nearest', intersect: false},
+        plugins: {legend: {display: false}},
+        elements: {point: {radius: 0}, line: {tension: 0}},
+        scales: {
+          x: {type: 'linear', min: -SHOW_SECONDS, max: 0, ticks: {callback: v=>v+'s', color:'#888', maxTicksLimit:5}, grid: {color:'rgba(255,255,255,0.05)'}},
+          y: {ticks: {color:'#888'}, grid: {color:'rgba(255,255,255,0.05)'}, min: -500, max: 500}
+        }
+      }
+    });
+    charts.push(chart);
+  }
+
+  // 应用全局量程
+  applyGlobalRange();
+
+  recreateBufs();
+  recreateFilters();
+  document.getElementById('deviceLabel').textContent = cfg.label;
+}
+
+// 全局量程
+function applyGlobalRange() {
+  const sel = document.getElementById('rangeSelect');
+  const val = Number(sel ? sel.value : 500);
+  for (const ch of charts) {
+    ch.options.scales.y.min = -val;
+    ch.options.scales.y.max = val;
+    ch.update('none');
+  }
+}
+
+function toPoints(arr, len) {
+  const n = arr.length;
+  if (n === 0) return tEeg.map(x => ({x, y: 0}));
+  const a = new Array(len);
+  const start = len - n;
+  for (let i = 0; i < len; i++) {
+    a[i] = {x: i < start ? tEeg[0] - (start-i)/EEG_FS : tEeg[i-start], y: i < start ? 0 : arr[i-start]};
+  }
+  return a;
+}
+
+let redrawPending = false;
+function scheduleRedraw() {
+  if (redrawPending) return;
+  redrawPending = true;
+  requestAnimationFrame(() => { redrawPending = false; redrawAll(); });
+}
+function redrawAll() {
+  for (let i = 0; i < charts.length; i++) {
+    charts[i].data.datasets[0].data = toPoints(bufs[i].toArray(), EEG_POINTS);
+    charts[i].update('none');
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════
+// 前置检查
+// ═════════════════════════════════════════════════════════════════
+function preCheck() {
+  const el = document.getElementById('preCheckTip');
+  const tips = [];
+  let canBLE = true;
+  if (!navigator.bluetooth) { tips.push('浏览器不支持 Web Bluetooth，请使用 Chrome/Edge'); canBLE = false; }
+  if (location.protocol!=='https:' && location.hostname!=='localhost' && location.hostname!=='127.0.0.1') {
+    tips.push('非 HTTPS 环境，需通过 HTTPS 或 localhost 访问');
+  }
+  if (tips.length===0) {
+    el.innerHTML = '环境检测通过，可扫描设备'; el.style.background='rgba(46,213,115,0.2)'; el.style.borderLeftColor='#2ed573';
+  } else {
+    el.innerHTML = tips.join('<br>');
+    if (!canBLE) document.querySelectorAll('.control-panel button').forEach(b => b.disabled = true);
+  }
+}
+function showPageUrl() {
+  const qr = document.getElementById('qrArea');
+  const url = window.location.href;
+  if (url && !url.startsWith('file://')) qr.innerHTML = `手机扫码打开：<a href="${url}" target="_blank">${url}</a>`;
+  else qr.textContent = '提示：通过 localhost 或 HTTPS 打开';
+}
+
+// ═════════════════════════════════════════════════════════════════
+// BLE
+// ═════════════════════════════════════════════════════════════════
+function updateUI() {
+  document.getElementById('connectionStatus').textContent = S.connected ? `已连接 ${S.device?.name||''}` : '未连接';
+  document.getElementById('statusDot').className = 'status-dot' + (S.connected ? ' connected' : '');
+  document.getElementById('connectBtn').disabled = !S.device || S.connected;
+  document.getElementById('disconnectBtn').disabled = !S.connected;
+  document.getElementById('startBtn').disabled = !S.connected || S.collecting;
+  document.getElementById('stopBtn').disabled = !S.connected || !S.collecting;
+}
+
+function log(msg) {
+  const t = new Date().toLocaleTimeString();
+  const box = document.getElementById('logBox');
+  box.value += `[${t}] ${msg}\n`;
+  box.scrollTop = box.scrollHeight;
+}
+
+async function doScan() {
+  try {
+    const d = await navigator.bluetooth.requestDevice({
+      acceptAllDevices: true,
+      optionalServices: ['0000ffe0-0000-1000-8000-00805f9b34fb', '0000fff0-0000-1000-8000-00805f9b34fb']
+    });
+    S.device = d;
+    d.addEventListener('gattserverdisconnected', onDC);
+    log(`找到设备: ${d.name||'未知'} [${d.id}]`);
+    updateUI();
+  } catch(e) {
+    if (e.name==='NotAllowedError') log('用户取消选择');
+    else log(`扫描失败: ${e.message}`);
+  }
+}
+
+async function doConnect() {
+  if (!S.device) return;
+  try {
+    log('连接中...');
+    S.server = await S.device.gatt.connect();
+    const svcs = await S.server.getPrimaryServices();
+    for (const svc of svcs) {
+      try {
+        const chars = await svc.getCharacteristics();
+        for (const ch of chars) {
+          const uuid = ch.uuid.toLowerCase();
+          if (uuid.includes('ffe1') || uuid.includes('ffe3')) {
+            if (ch.properties.notify && !S.notifyCh) S.notifyCh = ch;
+            if ((ch.properties.write || ch.properties.writeWithoutResponse) && !S.writeCh) S.writeCh = ch;
+          }
+        }
+      } catch(e) {}
+    }
+    if (!S.notifyCh) {
+      for (const svc of svcs) {
+        try {
+          const chars = await svc.getCharacteristics();
+          for (const ch of chars) {
+            if (ch.properties.notify && !S.notifyCh) S.notifyCh = ch;
+            if ((ch.properties.write || ch.properties.writeWithoutResponse) && !S.writeCh) S.writeCh = ch;
+          }
+        } catch(e) {}
+      }
+    }
+    if (!S.notifyCh) throw new Error('未找到可通知特征');
+    if (!S.writeCh) S.writeCh = S.notifyCh;
+    await S.notifyCh.startNotifications();
+    S.notifyCh.addEventListener('characteristicvaluechanged', onData);
+    S.connected = true;
+    log(`已连接 (通知:${S.notifyCh.uuid} 写入:${S.writeCh.uuid})`);
+    updateUI();
+  } catch(e) { log(`连接失败: ${e.message}`); }
+}
+
+function onDC() {
+  S.connected=false; S.collecting=false; S.server=null; S.notifyCh=null; S.writeCh=null;
+  log('蓝牙已断开'); updateUI();
+}
+
+async function doDisconnect() {
+  if (S.device?.gatt?.connected) S.device.gatt.disconnect();
+  onDC();
+}
+
+async function doStart() {
+  if (!S.writeCh) return;
+  try {
+    const cmd = getCfg().startCmd;
+    if (S.writeCh.writeValueWithoutResponse) await S.writeCh.writeValueWithoutResponse(cmd);
+    else await S.writeCh.writeValue(cmd);
+    S.collecting = true; log('开始采集'); updateUI();
+  } catch(e) { log(`开始失败: ${e.message}`); }
+}
+
+async function doStop() {
+  if (!S.writeCh) return;
+  try {
+    const cmd = getCfg().stopCmd;
+    if (S.writeCh.writeValueWithoutResponse) await S.writeCh.writeValueWithoutResponse(cmd);
+    else await S.writeCh.writeValue(cmd);
+    S.collecting = false; log('停止采集'); updateUI();
+  } catch(e) { log(`停止失败: ${e.message}`); }
+}
+
+function onData(ev) {
+  const bytes = Array.from(new Uint8Array(ev.target.value.buffer));
+  if (!bytes.length) return;
+  rawLog.push(`${new Date().toISOString()},${bytesToHex(bytes)}`);
+  try {
+    const rows = parsePacket(bytes, getCfg());
+    if (rows && rows.length) {
+      S.pktCount++;
+      const nCh = getCfg().nChannels;
+      const nRows = rows.length;
+      for (let ch = 0; ch < nCh; ch++) {
+        let vals = rows.map(r => r[ch]);
+        if (filters[`hp${ch}`]) vals = vals.map(v => filters[`hp${ch}`].process(v));
+        if (filters[`lp${ch}`]) vals = vals.map(v => filters[`lp${ch}`].process(v));
+        if (filters[`notch${ch}`]) vals = vals.map(v => filters[`notch${ch}`].process(v));
+        bufs[ch].pushBatch(vals);
+      }
+      const last = rows[nRows-1];
+      for (let ch = 0; ch < nCh; ch++) {
+        const el = document.getElementById(`val${ch}`);
+        if (el) el.textContent = last[ch].toFixed(1) + ' uV';
+      }
+      document.getElementById('dataInfo').childNodes[0].textContent = `包:${S.pktCount}`;
+      scheduleRedraw();
+    }
+  } catch(e) { log(`解析错误: ${e.message}`); }
+}
+
+function doExport() {
+  if (!rawLog.length) { log('无数据可导出'); return; }
+  const blob = new Blob([rawLog.join('\n')], {type:'text/plain;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${currentDevice}_${new Date().toISOString().replace(/[:.]/g,'-')}.txt`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 3000);
+  log(`导出 ${rawLog.length} 条记录`);
+}
+
+function clearSession() {
+  if (!confirm('清除所有数据？')) return;
+  rawLog = []; S.pktCount = 0;
+  recreateBufs();
+  document.getElementById('dataInfo').childNodes[0].textContent = '等待数据...';
+  log('会话已清除');
+}
+
+// ═════════════════════════════════════════════════════════════════
+// 滤波 UI
+// ═════════════════════════════════════════════════════════════════
+function toggleFilter(btnId, stateKey) {
+  document.getElementById(btnId).classList.toggle('active');
+  S[stateKey] = document.getElementById(btnId).classList.contains('active');
+  recreateFilters();
+}
+
+document.getElementById('eegHpBtn').onclick = () => toggleFilter('eegHpBtn', 'eegHp');
+document.getElementById('eegLpBtn').onclick = () => { toggleFilter('eegLpBtn', 'eegLp'); S.eegLpF = Number(document.getElementById('eegLpFreq').value)||30; };
+document.getElementById('eegLpFreq').onchange = () => { S.eegLpF = Number(document.getElementById('eegLpFreq').value)||30; if (S.eegLp) recreateFilters(); };
+document.getElementById('eegNotchBtn').onclick = () => { S.notchFreq=50; toggleFilter('eegNotchBtn','eegNotch'); };
+document.getElementById('eegNotch60Btn').onclick = () => { S.notchFreq=60; toggleFilter('eegNotch60Btn','eegNotch'); };
+
+// ═════════════════════════════════════════════════════════════════
+// 设备切换
+// ═════════════════════════════════════════════════════════════════
+document.getElementById('deviceSelect').onchange = function() {
+  if (S.connected || S.collecting) {
+    if (!confirm('切换设备将断开当前连接，确认？')) { this.value = currentDevice; return; }
+    doDisconnect();
+  }
+  currentDevice = this.value;
+  rebuildCharts();
+  log(`切换到 ${getCfg().label}`);
+};
+
+// ═════════════════════════════════════════════════════════════════
+// 初始化
+// ═════════════════════════════════════════════════════════════════
+document.addEventListener('DOMContentLoaded', () => {
+  preCheck();
+  showPageUrl();
+  rebuildCharts();
+  updateUI();
+  log('页面已加载，选择设备型号后点击「扫描设备」');
+  document.getElementById('scanBtn').onclick = doScan;
+  document.getElementById('connectBtn').onclick = doConnect;
+  document.getElementById('disconnectBtn').onclick = doDisconnect;
+  document.getElementById('startBtn').onclick = doStart;
+  document.getElementById('stopBtn').onclick = doStop;
+  document.getElementById('exportBtn').onclick = doExport;
+  document.getElementById('clearBtn').onclick = clearSession;
+  document.getElementById('rangeSelect').onchange = applyGlobalRange;
+});
+</script>
+</body>
+</html>
