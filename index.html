@@ -195,16 +195,33 @@ function parsePacket(dataBytes, cfg) {
 }
 
 // ═════════════════════════════════════════════════════════════════
-// RingBuffer
+// 示波器缓冲区（每个通道一个 Float64Array + 独立光标）
 // ═════════════════════════════════════════════════════════════════
-class RingBuffer {
-  constructor(size) { this.data = new Float64Array(size); this.size = size; this.idx = 0; this.full = false; }
-  push(v) { this.data[this.idx] = v; this.idx = (this.idx+1) % this.size; if (this.idx===0) this.full=true; }
-  pushBatch(arr) { for (const v of arr) this.push(v); }
-  toArray() {
-    if (!this.full) return Array.from(this.data.slice(0, this.idx));
-    return Array.from(this.data.slice(this.idx)).concat(Array.from(this.data.slice(0, this.idx)));
+let scopeBufs = [];
+let scopeCursors = [];
+
+function recreateBufs() {
+  const n = getCfg().nChannels;
+  scopeBufs = Array.from({length: n}, () => new Float64Array(EEG_POINTS));
+  scopeCursors = new Array(n).fill(0);
+}
+
+function writeToScope(ch, vals) {
+  let cursor = scopeCursors[ch];
+  const n = vals.length;
+  const remaining = EEG_POINTS - cursor;
+  if (n <= remaining) {
+    scopeBufs[ch].set(vals, cursor);
+    cursor += n;
+  } else {
+    // 写入剩余空间，然后清空从头开始
+    scopeBufs[ch].set(vals.slice(0, remaining), cursor);
+    const extra = n - remaining;
+    scopeBufs[ch] = new Float64Array(EEG_POINTS);
+    scopeBufs[ch].set(vals.slice(remaining), 0);
+    cursor = extra;
   }
+  scopeCursors[ch] = cursor;
 }
 
 // ═════════════════════════════════════════════════════════════════
@@ -253,10 +270,9 @@ const S = {
   eegHp: false, eegLp: false, eegLpF: 30, eegNotch: false, notchFreq: 50
 };
 let filters = {};
-let bufs = [];
 let charts = [];
 let rawLog = [];
-const tEeg = Array.from({length: EEG_POINTS}, (_, i) => -SHOW_SECONDS + i / EEG_FS);
+const tEeg = Array.from({length: EEG_POINTS}, (_, i) => i / EEG_FS);
 
 function recreateBufs() {
   const n = getCfg().nChannels;
@@ -305,7 +321,7 @@ function rebuildCharts() {
         plugins: {legend: {display: false}},
         elements: {point: {radius: 0}, line: {tension: 0}},
         scales: {
-          x: {type: 'linear', min: -SHOW_SECONDS, max: 0, ticks: {callback: v=>v+'s', color:'#888', maxTicksLimit:5}, grid: {color:'rgba(255,255,255,0.05)'}},
+          x: {type: 'linear', min: 0, max: SHOW_SECONDS, ticks: {callback: v=>v+'s', color:'#888', maxTicksLimit:5}, grid: {color:'rgba(255,255,255,0.05)'}},
           y: {ticks: {color:'#888'}, grid: {color:'rgba(255,255,255,0.05)'}, min: -500, max: 500}
         }
       }
@@ -332,13 +348,11 @@ function applyGlobalRange() {
   }
 }
 
-function toPoints(arr, len) {
-  const n = arr.length;
-  if (n === 0) return tEeg.map(x => ({x, y: 0}));
+function toPoints(buf, len) {
+  // Scope: 直接将 Float64Array 转为 {x, y} 点集
   const a = new Array(len);
-  const start = len - n;
   for (let i = 0; i < len; i++) {
-    a[i] = {x: i < start ? tEeg[0] - (start-i)/EEG_FS : tEeg[i-start], y: i < start ? 0 : arr[i-start]};
+    a[i] = {x: i / EEG_FS, y: buf[i]};
   }
   return a;
 }
@@ -351,7 +365,7 @@ function scheduleRedraw() {
 }
 function redrawAll() {
   for (let i = 0; i < charts.length; i++) {
-    charts[i].data.datasets[0].data = toPoints(bufs[i].toArray(), EEG_POINTS);
+    charts[i].data.datasets[0].data = toPoints(scopeBufs[i], EEG_POINTS);
     charts[i].update('none');
   }
 }
@@ -402,17 +416,21 @@ function log(msg) {
 
 async function doScan() {
   try {
+    // acceptAllDevices 方式确保蓝牙选择窗口弹出
     const d = await navigator.bluetooth.requestDevice({
       acceptAllDevices: true,
-      optionalServices: ['0000ffe0-0000-1000-8000-00805f9b34fb', '0000fff0-0000-1000-8000-00805f9b34fb']
+      optionalServices: ['0000ffe0-0000-1000-8000-00805f9b34fb',
+                         '0000fff0-0000-1000-8000-00805f9b34fb']
     });
     S.device = d;
     d.addEventListener('gattserverdisconnected', onDC);
     log(`找到设备: ${d.name||'未知'} [${d.id}]`);
     updateUI();
   } catch(e) {
-    if (e.name==='NotAllowedError') log('用户取消选择');
-    else log(`扫描失败: ${e.message}`);
+    if (e.name==='NotFoundError') log('未发现附近设备');
+    else if (e.name==='NotAllowedError') log('用户取消选择');
+    else if (e.name==='SecurityError') log('页面需通过 HTTPS 或 localhost 访问');
+    else log(`扫描失败: ${e.message} (${e.name})`);
   }
 }
 
@@ -467,6 +485,8 @@ async function doDisconnect() {
 
 async function doStart() {
   if (!S.writeCh) return;
+  // 开始采集时重置示波器缓冲区
+  recreateBufs();
   try {
     const cmd = getCfg().startCmd;
     if (S.writeCh.writeValueWithoutResponse) await S.writeCh.writeValueWithoutResponse(cmd);
@@ -488,7 +508,9 @@ async function doStop() {
 function onData(ev) {
   const bytes = Array.from(new Uint8Array(ev.target.value.buffer));
   if (!bytes.length) return;
-  rawLog.push(`${new Date().toISOString()},${bytesToHex(bytes)}`);
+  const ts = new Date();
+  const localTS = ts.getFullYear()+'-'+String(ts.getMonth()+1).padStart(2,'0')+'-'+String(ts.getDate()).padStart(2,'0')+' '+String(ts.getHours()).padStart(2,'0')+':'+String(ts.getMinutes()).padStart(2,'0')+':'+String(ts.getSeconds()).padStart(2,'0')+'.'+String(ts.getMilliseconds()).padStart(3,'0');
+  rawLog.push(`${localTS},${bytesToHex(bytes)}`);
   try {
     const rows = parsePacket(bytes, getCfg());
     if (rows && rows.length) {
@@ -500,7 +522,7 @@ function onData(ev) {
         if (filters[`hp${ch}`]) vals = vals.map(v => filters[`hp${ch}`].process(v));
         if (filters[`lp${ch}`]) vals = vals.map(v => filters[`lp${ch}`].process(v));
         if (filters[`notch${ch}`]) vals = vals.map(v => filters[`notch${ch}`].process(v));
-        bufs[ch].pushBatch(vals);
+        writeToScope(ch, vals);
       }
       const last = rows[nRows-1];
       for (let ch = 0; ch < nCh; ch++) {
@@ -518,8 +540,10 @@ function doExport() {
   const blob = new Blob([rawLog.join('\n')], {type:'text/plain;charset=utf-8'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
+  const dt = new Date();
+  const localFileTS = dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0')+'_'+String(dt.getHours()).padStart(2,'0')+'-'+String(dt.getMinutes()).padStart(2,'0')+'-'+String(dt.getSeconds()).padStart(2,'0');
   a.href = url;
-  a.download = `${currentDevice}_${new Date().toISOString().replace(/[:.]/g,'-')}.txt`;
+  a.download = `${currentDevice}_${localFileTS}.txt`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 3000);
   log(`导出 ${rawLog.length} 条记录`);
