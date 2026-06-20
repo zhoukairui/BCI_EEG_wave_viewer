@@ -46,6 +46,36 @@ input[type="number"]{width:60px;padding:8px;background:rgba(255,255,255,0.1);bor
 
 footer{text-align:center;padding:15px;font-size:0.8rem;opacity:0.7;border-top:1px solid rgba(255,255,255,0.1);margin-top:15px}
 .log-box{width:100%;min-height:100px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.15);border-radius:8px;padding:10px;color:#a7f3d0;font-family:Consolas,monospace;font-size:11px;resize:vertical;margin-top:10px}
+
+/* ── 竖屏 / 响应式 ── */
+.orient-btn{padding:8px 10px;font-size:0.8rem;min-width:auto;background:rgba(255,255,255,0.1)}
+.orient-btn.portrait{background:linear-gradient(to right,#4361ee,#3a0ca3)}
+
+/* 竖屏模式：紧凑布局 */
+.portrait-mode .control-panel.wide{grid-template-columns:repeat(4,1fr);gap:6px}
+.portrait-mode .control-panel button{padding:8px 6px;font-size:0.78rem}
+.portrait-mode .filter-panel{padding:10px}
+.portrait-mode .filter-group h3{font-size:0.85rem;margin-right:8px}
+.portrait-mode .filter-btn{padding:5px 8px;font-size:0.75rem}
+.portrait-mode .filter-controls{gap:4px}
+.portrait-mode .device-selector select{padding:7px;font-size:0.85rem}
+.portrait-mode .channel-labels{width:48px}
+.portrait-mode .channel-labels .cl-name{font-size:0.7rem}
+.portrait-mode .log-box{min-height:60px;font-size:10px}
+.portrait-mode header{padding:8px 0;margin-bottom:8px}
+.portrait-mode h1{font-size:1.1rem}
+.portrait-mode .status-bar{padding:6px 8px;font-size:0.8rem}
+.portrait-mode .tip-box{font-size:0.75rem;padding:6px}
+
+/* 小屏幕自适应 */
+@media(max-width:600px){
+  .control-panel.wide:not(.portrait-mode .control-panel.wide){grid-template-columns:repeat(4,1fr);gap:6px}
+  .control-panel button{padding:8px 6px;font-size:0.78rem}
+  .channel-labels{width:48px}
+  .channel-labels .cl-name{font-size:0.7rem}
+  .filter-btn{padding:5px 8px;font-size:0.75rem}
+  .log-box{min-height:60px;font-size:10px}
+}
 </style>
 </head>
 <body>
@@ -78,6 +108,7 @@ footer{text-align:center;padding:15px;font-size:0.8rem;opacity:0.7;border-top:1p
 <button id="stopBtn" class="danger" disabled>停止</button>
 <button id="exportBtn">导出日志</button>
 <button id="clearBtn">新建会话</button>
+<button id="orientBtn" class="orient-btn">竖屏显示</button>
 </div>
 <div class="filter-panel">
 <div class="filter-group">
@@ -266,6 +297,7 @@ const S = {
 let filters = {};
 let rawLog = [];
 let lastExportedIdx = 0;
+let isPortrait = false;
 
 function recreateBufs() {
   const n = getCfg().nChannels;
@@ -297,10 +329,17 @@ function rebuildCanvas() {
   const cfg = getCfg();
   const n = cfg.nChannels;
 
-  // 计算尺寸
+  // 计算尺寸（横竖屏自适应）
   const container = canvas.parentElement;
-  canvasW = container.clientWidth - 80; // 留出标签列宽度
-  chH = Math.max(70, Math.min(140, Math.floor(560 / n)));
+  const labelW = isPortrait ? 48 : 80;
+  canvasW = container.clientWidth - labelW;
+  if (isPortrait) {
+    // 竖屏：根据可视高度压缩通道高度
+    const availH = window.innerHeight - 380; // 扣除 UI 控件占用的估算高度
+    chH = Math.max(40, Math.min(90, Math.floor(availH / n)));
+  } else {
+    chH = Math.max(70, Math.min(140, Math.floor(560 / n)));
+  }
   canvasH = n * chH + 24; // +24 给 X 轴标签
 
   const dpr = window.devicePixelRatio || 1;
@@ -646,11 +685,6 @@ function onData(ev) {
         }
         scopeCursors[ch] = cursor;
       }
-      const last = rows[nRows-1];
-      for (let ch = 0; ch < nCh; ch++) {
-        const el = document.getElementById(`val${ch}`);
-        if (el) el.textContent = last[ch].toFixed(1) + ' uV';
-      }
       document.getElementById('dataInfo').childNodes[0].textContent = `包:${S.pktCount}`;
       scheduleRedraw();
     }
@@ -699,6 +733,24 @@ function applyTimeWindow() {
   rebuildCanvas();
 }
 
+function toggleOrientation() {
+  isPortrait = !isPortrait;
+  const btn = document.getElementById('orientBtn');
+  const container = document.querySelector('.container');
+  if (isPortrait) {
+    btn.textContent = '横屏显示';
+    btn.classList.add('portrait');
+    container.classList.add('portrait-mode');
+  } else {
+    btn.textContent = '竖屏显示';
+    btn.classList.remove('portrait');
+    container.classList.remove('portrait-mode');
+  }
+  // 延迟等 DOM 重排完成后重建画布
+  setTimeout(() => rebuildCanvas(), 50);
+  log(`切换为 ${isPortrait ? '竖屏' : '横屏'} 显示模式`);
+}
+
 function toggleFilter(btnId, stateKey) {
   document.getElementById(btnId).classList.toggle('active');
   S[stateKey] = document.getElementById(btnId).classList.contains('active');
@@ -731,8 +783,24 @@ let resizeTimer = null;
 window.addEventListener('resize', () => {
   if (resizeTimer) clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
-    // 只有 canvas 存在时才重建
-    if (document.getElementById('mainCanvas')) rebuildCanvas();
+    if (!document.getElementById('mainCanvas')) return;
+    // 物理旋转时自动切换布局模式
+    const shouldBePortrait = window.innerWidth < window.innerHeight;
+    if (shouldBePortrait !== isPortrait) {
+      isPortrait = shouldBePortrait;
+      const btn = document.getElementById('orientBtn');
+      const container = document.querySelector('.container');
+      if (isPortrait) {
+        btn.textContent = '横屏显示';
+        btn.classList.add('portrait');
+        container.classList.add('portrait-mode');
+      } else {
+        btn.textContent = '竖屏显示';
+        btn.classList.remove('portrait');
+        container.classList.remove('portrait-mode');
+      }
+    }
+    rebuildCanvas();
   }, 200);
 });
 
@@ -754,6 +822,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('clearBtn').onclick = clearSession;
   document.getElementById('rangeSelect').onchange = applyGlobalRange;
   document.getElementById('timeWindowSelect').onchange = applyTimeWindow;
+  document.getElementById('orientBtn').onclick = toggleOrientation;
 });
 </script>
 </body>
