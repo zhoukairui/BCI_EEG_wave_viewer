@@ -195,17 +195,10 @@ function parsePacket(dataBytes, cfg) {
 }
 
 // ═════════════════════════════════════════════════════════════════
-// RingBuffer
+// Scope 缓冲区（光标写入，满屏清零）
 // ═════════════════════════════════════════════════════════════════
-class RingBuffer {
-  constructor(size) { this.data = new Float64Array(size); this.size = size; this.idx = 0; this.full = false; }
-  push(v) { this.data[this.idx] = v; this.idx = (this.idx+1) % this.size; if (this.idx===0) this.full=true; }
-  pushBatch(arr) { for (const v of arr) this.push(v); }
-  toArray() {
-    if (!this.full) return Array.from(this.data.slice(0, this.idx));
-    return Array.from(this.data.slice(this.idx)).concat(Array.from(this.data.slice(0, this.idx)));
-  }
-}
+let scopeBufs = [];   // 每个通道一个 Float64Array(EEG_POINTS)
+let scopeCursors = []; // 每个通道当前写入位置
 
 // ═════════════════════════════════════════════════════════════════
 // 滤波器
@@ -253,14 +246,15 @@ const S = {
   eegHp: false, eegLp: false, eegLpF: 30, eegNotch: false, notchFreq: 50
 };
 let filters = {};
-let bufs = [];
 let charts = [];
 let rawLog = [];
-const tEeg = Array.from({length: EEG_POINTS}, (_, i) => -SHOW_SECONDS + i / EEG_FS);
+// scope 模式：X 轴为 0 ~ EEG_POINTS 索引
+const tEeg = Array.from({length: EEG_POINTS}, (_, i) => i);
 
 function recreateBufs() {
   const n = getCfg().nChannels;
-  bufs = Array.from({length: n}, () => new RingBuffer(EEG_POINTS));
+  scopeBufs = Array.from({length: n}, () => new Float64Array(EEG_POINTS));
+  scopeCursors = new Array(n).fill(0);
 }
 
 function recreateFilters() {
@@ -305,7 +299,7 @@ function rebuildCharts() {
         plugins: {legend: {display: false}},
         elements: {point: {radius: 0}, line: {tension: 0}},
         scales: {
-          x: {type: 'linear', min: -SHOW_SECONDS, max: 0, ticks: {callback: v=>v+'s', color:'#888', maxTicksLimit:5}, grid: {color:'rgba(255,255,255,0.05)'}},
+          x: {type: 'linear', min: 0, max: EEG_POINTS-1, ticks: {callback: v=>Math.round(v/EEG_FS*10)/10+'s', color:'#888', maxTicksLimit:6}, grid: {color:'rgba(255,255,255,0.05)'}},
           y: {ticks: {color:'#888'}, grid: {color:'rgba(255,255,255,0.05)'}, min: -500, max: 500}
         }
       }
@@ -332,14 +326,10 @@ function applyGlobalRange() {
   }
 }
 
-function toPoints(arr, len) {
-  const n = arr.length;
-  if (n === 0) return tEeg.map(x => ({x, y: 0}));
-  const a = new Array(len);
-  const start = len - n;
-  for (let i = 0; i < len; i++) {
-    a[i] = {x: i < start ? tEeg[0] - (start-i)/EEG_FS : tEeg[i-start], y: i < start ? 0 : arr[i-start]};
-  }
+function toScopeData(chIdx) {
+  const buf = scopeBufs[chIdx];
+  const a = new Array(EEG_POINTS);
+  for (let i = 0; i < EEG_POINTS; i++) a[i] = {x: i, y: buf[i]};
   return a;
 }
 
@@ -351,7 +341,7 @@ function scheduleRedraw() {
 }
 function redrawAll() {
   for (let i = 0; i < charts.length; i++) {
-    charts[i].data.datasets[0].data = toPoints(bufs[i].toArray(), EEG_POINTS);
+    charts[i].data.datasets[0].data = toScopeData(i);
     charts[i].update('none');
   }
 }
@@ -467,6 +457,8 @@ async function doDisconnect() {
 
 async function doStart() {
   if (!S.writeCh) return;
+  // 开始采集时清空 scope 缓冲区，从头扫描
+  recreateBufs();
   try {
     const cmd = getCfg().startCmd;
     if (S.writeCh.writeValueWithoutResponse) await S.writeCh.writeValueWithoutResponse(cmd);
@@ -502,7 +494,16 @@ function onData(ev) {
         if (filters[`hp${ch}`]) vals = vals.map(v => filters[`hp${ch}`].process(v));
         if (filters[`lp${ch}`]) vals = vals.map(v => filters[`lp${ch}`].process(v));
         if (filters[`notch${ch}`]) vals = vals.map(v => filters[`notch${ch}`].process(v));
-        bufs[ch].pushBatch(vals);
+        // scope 光标写入
+        const buf = scopeBufs[ch];
+        let cursor = scopeCursors[ch];
+        for (const v of vals) {
+          if (cursor >= EEG_POINTS) {
+            cursor = 0;  // 归零从头覆盖，不清空旧数据
+          }
+          buf[cursor++] = v;
+        }
+        scopeCursors[ch] = cursor;
       }
       const last = rows[nRows-1];
       for (let ch = 0; ch < nCh; ch++) {
