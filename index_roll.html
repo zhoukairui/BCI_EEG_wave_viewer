@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>EEG Unified 多设备脑电监测</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;font-family:'Segoe UI',Arial,sans-serif}
 body{background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);color:#e6e6e6;min-height:100vh;padding:10px}
@@ -36,14 +37,10 @@ input[type="number"]{width:60px;padding:8px;background:rgba(255,255,255,0.1);bor
 .status-dot.connected{background:#2ed573;animation:pulse 2s infinite}
 @keyframes pulse{0%{opacity:1}50%{opacity:0.5}100%{opacity:1}}
 .data-info{font-size:0.8rem;opacity:0.8}
-
-/* ── 单画布布局 ── */
-.plot-area{display:flex;gap:0;margin-bottom:10px;position:relative;background:rgba(0,0,0,0.25);border-radius:8px;padding:5px}
-.channel-labels{display:flex;flex-direction:column;flex-shrink:0;justify-content:space-around;padding:4px 8px 4px 4px;width:72px;user-select:none}
-.channel-labels .cl-item{display:flex;flex-direction:column;align-items:flex-end;justify-content:center;line-height:1.2}
-.channel-labels .cl-name{font-size:0.82rem;font-weight:bold}
-#mainCanvas{flex:1;display:block;border-radius:4px;background:#0a0a18;cursor:crosshair}
-
+.chart-grid{display:grid;gap:15px;margin-bottom:15px}
+.chart-container{background:rgba(0,0,0,0.3);border-radius:8px;padding:10px;position:relative;height:220px}
+.chart-title{font-size:1rem;margin-bottom:8px;color:#72efdd;display:flex;justify-content:space-between;align-items:center}
+.chart-title .val{font-size:0.8rem;color:#aaa}
 footer{text-align:center;padding:15px;font-size:0.8rem;opacity:0.7;border-top:1px solid rgba(255,255,255,0.1);margin-top:15px}
 .log-box{width:100%;min-height:100px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.15);border-radius:8px;padding:10px;color:#a7f3d0;font-family:Consolas,monospace;font-size:11px;resize:vertical;margin-top:10px}
 </style>
@@ -105,29 +102,14 @@ footer{text-align:center;padding:15px;font-size:0.8rem;opacity:0.7;border-top:1p
 </select>
 </div>
 </div>
-<div class="filter-group" style="margin-bottom:0">
-<h3>时间窗口</h3>
-<div class="filter-controls">
-<select id="timeWindowSelect" style="padding:8px 12px;background:#2a2a4a;border:1px solid rgba(255,255,255,0.2);border-radius:8px;color:#e6e6e6;font-size:0.9rem;cursor:pointer;outline:none">
-<option value="1">1 s</option>
-<option value="5">5 s</option>
-<option value="10" selected>10 s</option>
-<option value="30">30 s</option>
-<option value="60">60 s</option>
-</select>
-</div>
-</div>
 </div>
 <textarea class="log-box" id="logBox" readonly placeholder="运行日志..."></textarea>
-<div class="plot-area" id="plotArea">
-<div class="channel-labels" id="channelLabels"></div>
-<canvas id="mainCanvas"></canvas>
-</div>
+<div class="chart-grid" id="chartGrid"></div>
 <footer><p>基于 Web Bluetooth | 兼容 Chrome/Edge</p></footer>
 </div>
 <script>
 // ═════════════════════════════════════════════════════════════════
-// 设备配置表
+// 设备配置表（新增设备类型只需在此添加条目）
 // ═════════════════════════════════════════════════════════════════
 const DEVICE_PROFILES = {
   EEG_001: {
@@ -138,7 +120,7 @@ const DEVICE_PROFILES = {
     payloadStart: 4,
     payloadLen: 75,
     nSamples: 25,
-    samplesPerRow: 1,
+    samplesPerRow: 1,      // 1 physical, duplicated to 2
     startCmd: new Uint8Array([0x62]),
     stopCmd:  new Uint8Array([0x63]),
     saveSuffix: '_EEG001_ble_data.txt',
@@ -170,9 +152,8 @@ const DEVICE_PROFILES = {
     saveSuffix: '_EEG008_ble_data.txt',
   }
 };
-const EEG_FS = 250;
-let SHOW_SECONDS = 10;
-let EEG_POINTS = EEG_FS * SHOW_SECONDS;
+const EEG_FS = 250, SHOW_SECONDS = 10, EEG_POINTS = EEG_FS * SHOW_SECONDS;
+const RANGE_VALUES = [50, 100, 200, 500, 1000, 2000, 5000, 10000];
 
 // ═════════════════════════════════════════════════════════════════
 // 工具函数
@@ -203,6 +184,7 @@ function parsePacket(dataBytes, cfg) {
   if (raw.length < nSamp) return null;
 
   if (spRow === 1) {
+    // EEG_001: duplicate
     return raw.slice(0, nSamp).map(v => [v, v]);
   } else {
     const nRows = Math.floor(nSamp / spRow);
@@ -213,10 +195,17 @@ function parsePacket(dataBytes, cfg) {
 }
 
 // ═════════════════════════════════════════════════════════════════
-// Scope 缓冲区
+// RingBuffer
 // ═════════════════════════════════════════════════════════════════
-let scopeBufs = [];
-let scopeCursors = [];
+class RingBuffer {
+  constructor(size) { this.data = new Float64Array(size); this.size = size; this.idx = 0; this.full = false; }
+  push(v) { this.data[this.idx] = v; this.idx = (this.idx+1) % this.size; if (this.idx===0) this.full=true; }
+  pushBatch(arr) { for (const v of arr) this.push(v); }
+  toArray() {
+    if (!this.full) return Array.from(this.data.slice(0, this.idx));
+    return Array.from(this.data.slice(this.idx)).concat(Array.from(this.data.slice(0, this.idx)));
+  }
+}
 
 // ═════════════════════════════════════════════════════════════════
 // 滤波器
@@ -264,13 +253,15 @@ const S = {
   eegHp: false, eegLp: false, eegLpF: 30, eegNotch: false, notchFreq: 50
 };
 let filters = {};
+let bufs = [];
+let charts = [];
 let rawLog = [];
 let lastExportedIdx = 0;
+const tEeg = Array.from({length: EEG_POINTS}, (_, i) => -SHOW_SECONDS + i / EEG_FS);
 
 function recreateBufs() {
   const n = getCfg().nChannels;
-  scopeBufs = Array.from({length: n}, () => new Float64Array(EEG_POINTS));
-  scopeCursors = new Array(n).fill(0);
+  bufs = Array.from({length: n}, () => new RingBuffer(EEG_POINTS));
 }
 
 function recreateFilters() {
@@ -284,209 +275,86 @@ function recreateFilters() {
 }
 
 // ═════════════════════════════════════════════════════════════════
-// 单 Canvas 绘图
+// 图表管理
 // ═════════════════════════════════════════════════════════════════
-let canvas = null, ctx = null;
-let canvasW = 0, canvasH = 0;
-let chH = 0;  // 每通道垂直像素高度
-
-function rebuildCanvas() {
-  canvas = document.getElementById('mainCanvas');
-  ctx = canvas.getContext('2d');
+function rebuildCharts() {
+  const grid = document.getElementById('chartGrid');
+  grid.innerHTML = '';
+  charts.forEach(c => c.destroy());
+  charts = [];
 
   const cfg = getCfg();
   const n = cfg.nChannels;
-
-  // 计算尺寸
-  const container = canvas.parentElement;
-  canvasW = container.clientWidth - 80; // 留出标签列宽度
-  chH = Math.max(70, Math.min(140, Math.floor(560 / n)));
-  canvasH = n * chH + 24; // +24 给 X 轴标签
-
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width = canvasW * dpr;
-  canvas.height = canvasH * dpr;
-  canvas.style.width = canvasW + 'px';
-  canvas.style.height = canvasH + 'px';
-  ctx.scale(dpr, dpr);
-
-  // 重建标签列
-  const labelDiv = document.getElementById('channelLabels');
-  labelDiv.innerHTML = '';
-  labelDiv.style.height = (canvasH - 24) + 'px';
   for (let i = 0; i < n; i++) {
-    const item = document.createElement('div');
-    item.className = 'cl-item';
-    item.innerHTML = `<span class="cl-name" style="color:${cfg.colors[i]}">CH${i+1}</span>`;
-    labelDiv.appendChild(item);
+    const container = document.createElement('div');
+    container.className = 'chart-container';
+    const title = document.createElement('div');
+    title.className = 'chart-title';
+    title.innerHTML = `<span>CH${i+1}</span><span class="val" id="val${i}">-- uV</span>`;
+    container.appendChild(title);
+    const canvas = document.createElement('canvas');
+    canvas.id = `chart${i}`;
+    container.appendChild(canvas);
+    grid.appendChild(container);
+
+    const chart = new Chart(canvas, {
+      type: 'line',
+      data: { labels: tEeg, datasets: [{label: `CH${i+1}`, data: [], borderColor: cfg.colors[i], borderWidth: 1.5}] },
+      options: {
+        animation: false, responsive: true, maintainAspectRatio: false, normalized: true,
+        interaction: {mode: 'nearest', intersect: false},
+        plugins: {legend: {display: false}},
+        elements: {point: {radius: 0}, line: {tension: 0}},
+        scales: {
+          x: {type: 'linear', min: -SHOW_SECONDS, max: 0, ticks: {callback: v=>v+'s', color:'#888', maxTicksLimit:5}, grid: {color:'rgba(255,255,255,0.05)'}},
+          y: {ticks: {color:'#888'}, grid: {color:'rgba(255,255,255,0.05)'}, min: -500, max: 500}
+        }
+      }
+    });
+    charts.push(chart);
   }
+
+  // 应用全局量程
+  applyGlobalRange();
 
   recreateBufs();
   recreateFilters();
   document.getElementById('deviceLabel').textContent = cfg.label;
-  scheduleRedraw();
 }
 
-function drawScope() {
-  if (!ctx) return;
-  const cfg = getCfg();
-  const n = cfg.nChannels;
-  const range = Number(document.getElementById('rangeSelect').value);
-  // gain：range uV 映射到 chH * 0.38 像素（留出通道间间隔）
-  const gain = (chH * 0.38) / range;
-  const plotH = n * chH;
-  const padL = 10, padR = 10; // 左右内边距，给刻度标签留空间
-  const plotW = canvasW - padL - padR;
-  const xScale = plotW / EEG_POINTS;
-
-  // ── 清屏 ──
-  ctx.clearRect(0, 0, canvasW, canvasH);
-
-  // ── 网格线 ──
-  ctx.lineWidth = 1;
-  ctx.setLineDash([]);
-  const gridColor = 'rgba(255,255,255,0.08)';
-  const gridColorStrong = 'rgba(255,255,255,0.15)';
-
-  // 水平网格线（通道基线）
-  for (let i = 0; i < n; i++) {
-    const y = (i + 0.5) * chH;
-    ctx.strokeStyle = i === 0 ? gridColorStrong : gridColor;
-    ctx.beginPath();
-    ctx.moveTo(padL, y);
-    ctx.lineTo(padL + plotW, y);
-    ctx.stroke();
-  }
-
-  // ── 自适应垂直网格线 ──
-  let gridStep, labelStep;
-  if (SHOW_SECONDS <= 2)      { gridStep = 0.01; labelStep = 0.1; }
-  else if (SHOW_SECONDS <= 5) { gridStep = 0.05; labelStep = 0.5; }
-  else if (SHOW_SECONDS <= 10){ gridStep = 0.1;  labelStep = 1;   }
-  else if (SHOW_SECONDS <= 30){ gridStep = 0.5;  labelStep = 5;   }
-  else                        { gridStep = 1;    labelStep = 10;  }
-
-  const nGrids = Math.round(SHOW_SECONDS / gridStep);
-  const halfStep = gridStep * 5;
-  const labelEvery = Math.round(labelStep / gridStep);
-
-  for (let i = 1; i <= nGrids; i++) {
-    const x = padL + (i * gridStep / SHOW_SECONDS) * plotW;
-    if (i % labelEvery === 0) {
-      ctx.strokeStyle = gridColorStrong;
-    } else if (halfStep > 0 && (i * gridStep) % halfStep === 0) {
-      ctx.strokeStyle = gridColor;
-    } else {
-      ctx.strokeStyle = 'rgba(255,255,255,0.04)';
-    }
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, plotH);
-    ctx.stroke();
-  }
-
-  // ── 绘制各通道波形 ──
-  for (let ch = 0; ch < n; ch++) {
-    const buf = scopeBufs[ch];
-    const baseline = (ch + 0.5) * chH;
-
-    ctx.beginPath();
-    ctx.strokeStyle = cfg.colors[ch];
-    ctx.lineWidth = 1.5;
-    ctx.globalAlpha = 0.85;
-
-    let moved = false;
-    for (let x = 0; x < EEG_POINTS; x++) {
-      const px = padL + x * xScale;
-      const py = baseline - buf[x] * gain;
-      if (!moved) {
-        ctx.moveTo(px, py);
-        moved = true;
-      } else {
-        ctx.lineTo(px, py);
-      }
-    }
-    ctx.stroke();
-  }
-  ctx.globalAlpha = 1;
-
-  // ── 第一通道左侧量程标尺 ──
-  if (n > 0) {
-    const rulerX = padL + 4;
-    const b0 = 0.5 * chH;
-    const halfSpan = chH * 0.38;
-    const topY = b0 - halfSpan;
-    const botY = b0 + halfSpan;
-    const nTicks = 5;
-    const rulerColor = 'rgba(255,255,255,0.5)';
-
-    ctx.strokeStyle = rulerColor;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(rulerX, topY);
-    ctx.lineTo(rulerX, botY);
-    ctx.stroke();
-
-    ctx.font = '9px sans-serif';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    for (let i = 0; i < nTicks; i++) {
-      const frac = (i - (nTicks - 1) / 2) / ((nTicks - 1) / 2);
-      const y = b0 - frac * halfSpan;
-      const val = Math.round(frac * range);
-      ctx.beginPath();
-      ctx.moveTo(rulerX, y);
-      ctx.lineTo(rulerX + 4, y);
-      ctx.stroke();
-      ctx.fillStyle = i === Math.floor(nTicks / 2) ? '#aaa' : rulerColor;
-      ctx.fillText(val, rulerX + 7, y);
-    }
-  }
-
-  // ── X 轴刻度（自适应步长） ──
-  ctx.font = '10px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  for (let i = 0; i <= nGrids; i++) {
-    const t = i * gridStep;
-    const x = padL + (t / SHOW_SECONDS) * plotW;
-    if (i % labelEvery === 0) {
-      // 标签位置：长刻度 + 标签
-      const label = labelStep >= 1 ? t + 's' : t.toFixed(1) + 's';
-      ctx.fillStyle = '#888';
-      ctx.fillText(label, x, plotH + 6);
-      ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(x, plotH);
-      ctx.lineTo(x, plotH + 5);
-      ctx.stroke();
-    } else if (halfStep > 0 && (i * gridStep) % halfStep === 0) {
-      // 半程位置：中刻度
-      ctx.strokeStyle = 'rgba(255,255,255,0.2)';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(x, plotH);
-      ctx.lineTo(x, plotH + 4);
-      ctx.stroke();
-    } else {
-      // 细网格位置：短刻度
-      ctx.strokeStyle = 'rgba(255,255,255,0.1)';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(x, plotH);
-      ctx.lineTo(x, plotH + 2);
-      ctx.stroke();
-    }
+// 全局量程
+function applyGlobalRange() {
+  const sel = document.getElementById('rangeSelect');
+  const val = Number(sel ? sel.value : 500);
+  for (const ch of charts) {
+    ch.options.scales.y.min = -val;
+    ch.options.scales.y.max = val;
+    ch.update('none');
   }
 }
 
-// ── 重绘调度 ──
+function toPoints(arr, len) {
+  const n = arr.length;
+  if (n === 0) return tEeg.map(x => ({x, y: 0}));
+  const a = new Array(len);
+  const start = len - n;
+  for (let i = 0; i < len; i++) {
+    a[i] = {x: i < start ? tEeg[0] - (start-i)/EEG_FS : tEeg[i-start], y: i < start ? 0 : arr[i-start]};
+  }
+  return a;
+}
+
 let redrawPending = false;
 function scheduleRedraw() {
   if (redrawPending) return;
   redrawPending = true;
-  requestAnimationFrame(() => { redrawPending = false; drawScope(); });
+  requestAnimationFrame(() => { redrawPending = false; redrawAll(); });
+}
+function redrawAll() {
+  for (let i = 0; i < charts.length; i++) {
+    charts[i].data.datasets[0].data = toPoints(bufs[i].toArray(), EEG_POINTS);
+    charts[i].update('none');
+  }
 }
 
 // ═════════════════════════════════════════════════════════════════
@@ -600,7 +468,6 @@ async function doDisconnect() {
 
 async function doStart() {
   if (!S.writeCh) return;
-  recreateBufs();
   try {
     const cmd = getCfg().startCmd;
     if (S.writeCh.writeValueWithoutResponse) await S.writeCh.writeValueWithoutResponse(cmd);
@@ -636,15 +503,7 @@ function onData(ev) {
         if (filters[`hp${ch}`]) vals = vals.map(v => filters[`hp${ch}`].process(v));
         if (filters[`lp${ch}`]) vals = vals.map(v => filters[`lp${ch}`].process(v));
         if (filters[`notch${ch}`]) vals = vals.map(v => filters[`notch${ch}`].process(v));
-        const buf = scopeBufs[ch];
-        let cursor = scopeCursors[ch];
-        for (const v of vals) {
-          if (cursor >= EEG_POINTS) {
-            cursor = 0;  // 归零从头覆盖
-          }
-          buf[cursor++] = v;
-        }
-        scopeCursors[ch] = cursor;
+        bufs[ch].pushBatch(vals);
       }
       const last = rows[nRows-1];
       for (let ch = 0; ch < nCh; ch++) {
@@ -670,7 +529,7 @@ function doExport() {
   a.href = url;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 3000);
-  lastExportedIdx = rawLog.length;  // 记住已导出的位置
+  lastExportedIdx = rawLog.length;
   log(`导出 ${newData.length} 条新记录 (累计 ${lastExportedIdx} 条)`);
 }
 
@@ -681,24 +540,11 @@ function clearSession() {
   recreateBufs();
   document.getElementById('dataInfo').childNodes[0].textContent = '等待数据...';
   log('会话已清除');
-  scheduleRedraw();
 }
 
 // ═════════════════════════════════════════════════════════════════
-// 量程 / 滤波 UI
+// 滤波 UI
 // ═════════════════════════════════════════════════════════════════
-function applyGlobalRange() {
-  scheduleRedraw();
-}
-
-function applyTimeWindow() {
-  const sel = document.getElementById('timeWindowSelect');
-  SHOW_SECONDS = Number(sel.value);
-  EEG_POINTS = EEG_FS * SHOW_SECONDS;
-  log(`时间窗口切换为 ${SHOW_SECONDS}s`);
-  rebuildCanvas();
-}
-
 function toggleFilter(btnId, stateKey) {
   document.getElementById(btnId).classList.toggle('active');
   S[stateKey] = document.getElementById(btnId).classList.contains('active');
@@ -720,21 +566,9 @@ document.getElementById('deviceSelect').onchange = function() {
     doDisconnect();
   }
   currentDevice = this.value;
-  rebuildCanvas();
+  rebuildCharts();
   log(`切换到 ${getCfg().label}`);
 };
-
-// ═════════════════════════════════════════════════════════════════
-// 窗口自适应
-// ═════════════════════════════════════════════════════════════════
-let resizeTimer = null;
-window.addEventListener('resize', () => {
-  if (resizeTimer) clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => {
-    // 只有 canvas 存在时才重建
-    if (document.getElementById('mainCanvas')) rebuildCanvas();
-  }, 200);
-});
 
 // ═════════════════════════════════════════════════════════════════
 // 初始化
@@ -742,7 +576,7 @@ window.addEventListener('resize', () => {
 document.addEventListener('DOMContentLoaded', () => {
   preCheck();
   showPageUrl();
-  rebuildCanvas();
+  rebuildCharts();
   updateUI();
   log('页面已加载，选择设备型号后点击「扫描设备」');
   document.getElementById('scanBtn').onclick = doScan;
@@ -753,7 +587,6 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('exportBtn').onclick = doExport;
   document.getElementById('clearBtn').onclick = clearSession;
   document.getElementById('rangeSelect').onchange = applyGlobalRange;
-  document.getElementById('timeWindowSelect').onchange = applyTimeWindow;
 });
 </script>
 </body>
