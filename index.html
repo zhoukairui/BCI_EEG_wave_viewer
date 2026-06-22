@@ -549,8 +549,9 @@ function preCheck() {
 function showPageUrl() {
   const qr = document.getElementById('qrArea');
   const url = window.location.href;
-  if (url && !url.startsWith('file://')) qr.innerHTML = `手机扫码打开：<a href="${url}" target="_blank">${url}</a>`;
-  else qr.textContent = '提示：通过 localhost 或 HTTPS 打开';
+  // if (url && !url.startsWith('file://')) qr.innerHTML = `手机扫码打开：<a href="${url}" target="_blank">${url}</a>`;
+  // else qr.textContent = '提示：通过 localhost 或 HTTPS 打开';
+  qr.textContent = '提示：通过 localhost 或 HTTPS 打开';
 }
 
 // ═════════════════════════════════════════════════════════════════
